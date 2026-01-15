@@ -137,11 +137,21 @@ Product:
 ├── name (string)             # shorttext
 ├── name_display (string)     # ext_print_productname (optional)
 ├── ingredients (text)        # ext_zutaten
-├── price (decimal)           # ext_sales_price (parsed)
 ├── weight (int)              # In grams (parsed from ext_weight)
 ├── unit (string)             # pcs., kg, etc.
 ├── vendor (string)           # vendorname
 ├── packing_type (string)     # Box, Single, etc.
+│
+├── # Pricing (from 1C)
+├── price_synced (decimal)    # ext_sales_price from 1C
+├── price_override (decimal)  # Owner override (nullable) - takes precedence
+│   # Effective price = price_override ?? price_synced
+│
+├── # Stock (from 1C)
+├── stock_synced (int)        # Raw quantity from 1C
+├── stock_override (int)      # Owner override (nullable) - takes precedence
+├── stock_buffer (int)        # Default 5, per-product override
+│   # Effective stock = (stock_override ?? stock_synced) - stock_buffer
 │
 ├── # Nutritional (per 100g)
 ├── kcal (int)
@@ -154,21 +164,35 @@ Product:
 ├── salt (decimal)
 │
 ├── # Categories
-├── category_id (FK)          # maingroup
-├── subcategory_id (FK)       # catalog_level_2
-│
-├── # Stock
-├── stock_quantity (int)      # Raw quantity from 1C
-├── stock_buffer (int)        # Default 5, per-product override
+├── category_id (FK)          # Points to leaf category (see Category model)
 │
 ├── # Relations
 ├── images (relation)
 │
 ├── # Status
-├── is_available (bool)       # Can be manually disabled
+├── is_available (bool)       # Can be manually disabled by owner
 ├── created_at (datetime)
 ├── updated_at (datetime)
 └── last_synced_at (datetime) # When scraper last updated this
+```
+
+**Price/Stock Override Logic:**
+- 1C syncs `price_synced` and `stock_synced` hourly
+- Owner can set `price_override` or `stock_override` in admin dashboard
+- Override takes precedence over synced value
+- To revert to 1C value, set override to NULL
+
+### ProductImage Model
+
+```python
+ProductImage:
+├── id (UUID)
+├── product_id (FK)
+├── url (string)              # S3 URL
+├── position (int)            # Display order (0 = first)
+├── is_primary (bool)         # Main image for listings
+├── alt_text (string)         # Accessibility
+└── uploaded_at (datetime)
 ```
 
 ### Category Model (Hierarchical)
@@ -273,6 +297,113 @@ Address:
 └── created_at (datetime)
 ```
 
+### Order Model
+
+```python
+Order:
+├── id (UUID)
+├── order_number (string)        # Human-readable: "GAS-2026-00042"
+├── user_id (FK)
+│
+├── # Status
+├── status (enum)                # pending, confirmed, processing, shipped, delivered, cancelled
+├── payment_status (enum)        # pending, paid, failed, refunded
+│
+├── # Pricing (all computed at order time)
+├── subtotal (decimal)           # Sum of line items before discount
+├── discount_percent (decimal)   # Fidelity % applied (snapshot)
+├── discount_amount (decimal)    # Actual discount in €
+├── delivery_fee (decimal)       # Delivery charge
+├── total (decimal)              # Final amount: subtotal - discount + delivery_fee
+│
+├── # Payment
+├── payment_method (enum)        # paypal, card, cash_on_delivery
+├── payment_reference (string)   # Transaction ID from PayPal/Stripe (nullable)
+│
+├── # Delivery Address (SNAPSHOT - not FK, copied at order time)
+├── delivery_name (string)
+├── delivery_phone (string)
+├── delivery_street (string)
+├── delivery_house_number (string)
+├── delivery_apartment (string)
+├── delivery_city (string)
+├── delivery_postal_code (string)
+├── delivery_instructions (text)
+│
+├── # Relations
+├── items (relation)             # OrderItem list
+│
+├── # Admin
+├── admin_notes (text)           # Staff notes on this order
+├── fulfilled_by (FK, nullable)  # Which admin fulfilled it
+├── cancelled_by (FK, nullable)  # Which admin cancelled it
+├── cancellation_reason (text)
+│
+├── # Timestamps
+├── created_at (datetime)
+├── confirmed_at (datetime)
+├── shipped_at (datetime)
+├── delivered_at (datetime)
+└── cancelled_at (datetime)
+```
+
+### OrderItem Model
+
+```python
+OrderItem:
+├── id (UUID)
+├── order_id (FK)
+├── product_id (FK)
+│
+├── # Product Snapshot (captured at order time)
+├── product_name (string)        # In case product name changes
+├── product_price (decimal)      # Price at time of order
+├── product_barcode (string)     # For packing/verification
+│
+├── quantity (int)
+└── line_total (decimal)         # product_price * quantity
+```
+
+### Order Status Flow
+
+```
+┌─────────┐     ┌───────────┐     ┌────────────┐     ┌─────────┐     ┌───────────┐
+│ pending │ ──▶ │ confirmed │ ──▶ │ processing │ ──▶ │ shipped │ ──▶ │ delivered │
+└─────────┘     └───────────┘     └────────────┘     └─────────┘     └───────────┘
+                     │
+                     ▼
+               ┌───────────┐
+               │ cancelled │
+               └───────────┘
+```
+
+- **pending**: Order created, awaiting payment confirmation
+- **confirmed**: Payment received (or COD accepted), ready to process
+- **processing**: Staff is picking/packing the order
+- **shipped**: Out for delivery
+- **delivered**: Customer received it
+- **cancelled**: Order cancelled (refund if applicable)
+
+### Stock Deduction
+
+**When to deduct stock?**
+
+Option A: At order creation (pending) → Risk: unpaid orders hold stock
+Option B: At confirmation (payment received) → **Recommended**
+
+We deduct `stock_quantity` when order moves to `confirmed`. If cancelled, we restore it.
+
+### Payment & Refunds
+
+| Payment Method | Refund Process |
+|----------------|----------------|
+| PayPal | API refund via PayPal |
+| Card (Stripe) | API refund via Stripe |
+| Cash on Delivery | N/A - no payment collected yet |
+
+**Phase 1:** Manual refunds - admin marks as refunded, processes externally
+**Phase 2:** Automated refunds via payment provider APIs
+
 ### Fidelity Program Logic
 
 The shop has a spending-based discount program. Discount is derived from `total_spent`:
@@ -342,6 +473,73 @@ POST /api/stock/sync              # Stock-only update (hourly sync)
 
 ---
 
+## Admin Dashboard
+
+The owner and staff need a dashboard to manage orders, products, and customers.
+
+**Access:** Single admin role for owner and staff (no role hierarchy needed for now).
+
+### Order Management
+
+| Feature | Description |
+|---------|-------------|
+| View orders | List with filters: status, date range, customer |
+| Order details | Items, totals, customer info, delivery address |
+| Update status | Move through: pending → confirmed → processing → shipped → delivered |
+| Cancel order | Set cancellation reason, trigger refund if applicable |
+| Add notes | Staff notes visible only in admin |
+| Print packing slip | Generate PDF for warehouse |
+
+### Product Management
+
+| Feature | Description |
+|---------|-------------|
+| View products | List with search, filter by category, stock status |
+| Edit price | Set `price_override` (or clear to use 1C price) |
+| Edit stock | Set `stock_override` (or clear to use 1C stock) |
+| Edit buffer | Adjust `stock_buffer` per product |
+| Toggle availability | Enable/disable `is_available` |
+| View sync status | See `last_synced_at`, flag stale products |
+| Force re-sync | Trigger immediate sync for a product |
+
+### Customer Management
+
+| Feature | Description |
+|---------|-------------|
+| View customers | List with search, filter by fidelity status |
+| Customer details | Order history, total spent, addresses |
+| Add notes | Staff notes ("VIP customer", "problematic") |
+| Disable account | Set `is_active = false` |
+| View fidelity | Current discount %, spending history |
+
+### Inventory Alerts
+
+| Alert | Trigger |
+|-------|---------|
+| Low stock | `effective_stock < threshold` (e.g., < 5) |
+| Out of stock | `effective_stock <= 0` |
+| Sync stale | `last_synced_at` older than 2 hours |
+| Expiring soon | Batch expiry within 7 days (Phase 2) |
+
+### Settings (Owner only?)
+
+| Setting | Description |
+|---------|-------------|
+| Fidelity program | Enable/disable, adjust thresholds |
+| Default stock buffer | Global default for new products |
+| Delivery threshold | Max delivery time in minutes |
+| Sync frequency | How often to sync from 1C |
+
+### Reports (Phase 2)
+
+- Sales by period (day/week/month)
+- Top selling products
+- Revenue trends
+- Customer acquisition
+- Inventory turnover
+
+---
+
 ## Open Questions (To verify with shop owner)
 
 1. **Price field:** Use `ext_sales_price` or `baseprice`?
@@ -356,3 +554,5 @@ POST /api/stock/sync              # Stock-only update (hourly sync)
 **2026-01-14:** Initial architecture discussion. Defined product model structure, stock buffer strategy, and authentication flow with Clerk. Added complete 1C field mapping, batch tracking considerations, and dual sync mechanism (browser extension + hourly automated sync).
 
 **2026-01-14 (continued):** Added User model with social login support (Google, Facebook via Clerk), fidelity program (spending-based discount 5-20%), delivery range calculation (routing API for coastal/mountain geography), Address model with lat/long for distance calc, GDPR fields, admin notes.
+
+**2026-01-14 (continued):** Added Order and OrderItem models with full status flow (pending→confirmed→processing→shipped→delivered/cancelled). Address snapshot in orders. Stock deduction at confirmation. Payment methods (PayPal, card, COD) with manual refunds for Phase 1. Updated Product model with price_override and stock_override for owner control over 1C synced values. Added ProductImage model. Added comprehensive Admin Dashboard spec covering order management, product management, customer management, inventory alerts, settings, and Phase 2 reports.

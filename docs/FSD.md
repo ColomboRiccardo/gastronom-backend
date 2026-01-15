@@ -204,12 +204,112 @@ ProductBatch:
 
 The authentication flow:
 
-1. **Frontend** handles login/signup via Clerk's SDK
+1. **Frontend** handles login/signup via Clerk's SDK (supports Google, Facebook, email)
 2. **Frontend** gets a JWT token from Clerk
 3. **Backend** validates that JWT on protected routes
 4. **Backend** extracts user ID from token, creates/updates local user record
 
 Users are required to login (no guest checkout).
+
+### User Model
+
+```python
+User:
+├── id (UUID)
+├── clerk_id (string)            # From Clerk JWT - unique
+├── email (string)
+├── name (string)
+├── phone_number (string)        # For delivery coordination
+├── auth_provider (string)       # "google", "facebook", "email" - for analytics
+│
+├── # Orders & Spending
+├── orders (relation)            # Order history
+├── total_spent (decimal)        # Cumulative spending - drives fidelity discount
+├── order_count (int)            # Number of completed orders
+│
+├── # Fidelity Program
+├── fidelity_enabled (bool)      # Is user enrolled in fidelity program
+├── fidelity_discount (decimal)  # Cached current discount % (computed from total_spent)
+│
+├── # Delivery
+├── addresses (relation)         # Multiple addresses
+├── default_address_id (FK)      # Primary delivery address
+├── delivery_distance_km (decimal)   # Last calculated distance from shop
+├── delivery_time_minutes (int)      # Last calculated travel time
+├── delivery_eligible (bool)         # Within delivery range?
+├── delivery_checked_at (datetime)   # When delivery was last verified
+│
+├── # Legal/GDPR
+├── marketing_consent (bool)     # Opted in to promotional emails
+├── privacy_accepted_at (datetime)
+│
+├── # Admin
+├── notes (text)                 # Staff notes about customer
+├── is_active (bool)             # Soft disable without deleting
+├── is_admin (bool)              # Admin privileges
+│
+├── # Timestamps
+├── created_at (datetime)
+└── last_login_at (datetime)
+```
+
+### Address Model
+
+```python
+Address:
+├── id (UUID)
+├── user_id (FK)
+├── label (string)               # "Home", "Work", "Mom's house"
+├── street (string)
+├── house_number (string)
+├── apartment (string)           # Optional - floor, apt number
+├── city (string)
+├── postal_code (string)
+├── country (string)             # Default: Germany
+├── latitude (decimal)           # For distance calculation
+├── longitude (decimal)          # For distance calculation
+├── delivery_instructions (text) # "Ring twice", "Leave at door"
+├── is_default (bool)
+└── created_at (datetime)
+```
+
+### Fidelity Program Logic
+
+The shop has a spending-based discount program. Discount is derived from `total_spent`:
+
+| Total Spent | Discount |
+|-------------|----------|
+| < €1000     | 0%       |
+| €1000       | 5%       |
+| €1500       | ~12.5%   |
+| €2000+      | 20% (cap)|
+
+```python
+def calculate_fidelity_discount(total_spent: float) -> float:
+    if total_spent < 1000:
+        return 0
+    if total_spent >= 2000:
+        return 20  # Cap at 20%
+    # Linear scale: 5% at €1000 → 20% at €2000
+    return 5 + ((total_spent - 1000) / 1000) * 15
+```
+
+**Configuration:** Thresholds stored in settings table (not hardcoded) so owner can adjust.
+
+**Note:** Feature is optional. Owner may or may not enable it for online store.
+
+### Delivery Range Calculation
+
+Shop is in a coastal city between sea and mountains. Straight-line distance is unreliable.
+
+**Approach:**
+1. When user adds/updates address, call a routing API (Google Maps, OpenRouteService, etc.)
+2. Calculate actual driving time from shop to address
+3. Store `delivery_time_minutes` and `delivery_distance_km`
+4. Mark `delivery_eligible` based on threshold (e.g., < 45 minutes)
+5. Re-check periodically or when address changes
+
+**Open question:** What's the delivery time threshold? 30 min? 45 min? 1 hour?
 
 ---
 
@@ -254,3 +354,5 @@ POST /api/stock/sync              # Stock-only update (hourly sync)
 ## Session Log
 
 **2026-01-14:** Initial architecture discussion. Defined product model structure, stock buffer strategy, and authentication flow with Clerk. Added complete 1C field mapping, batch tracking considerations, and dual sync mechanism (browser extension + hourly automated sync).
+
+**2026-01-14 (continued):** Added User model with social login support (Google, Facebook via Clerk), fidelity program (spending-based discount 5-20%), delivery range calculation (routing API for coastal/mountain geography), Address model with lat/long for distance calc, GDPR fields, admin notes.

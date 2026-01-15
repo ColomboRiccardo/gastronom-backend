@@ -99,13 +99,14 @@ The **physical shop (1C) is the master**. The ecommerce database follows/mirrors
 | `ext_zucker` | `sugar` | Sugar in grams |
 | `ext_speisesalz` | `salt` | Salt in grams |
 
-### Stock & Batches (Future - needs verification with shop owner)
+### Stock & Expiry (Simplified)
 
-| Concept | Notes |
-|---------|-------|
-| `stock_expiry_date` | Expiry date - but products come in **batches** with different expiry dates |
-| Quantity | Not in current sample - needed for orders |
-| Batch tracking | Same product can have multiple batches with different expiry dates |
+| 1C Field | Usage | Notes |
+|----------|-------|-------|
+| `stock_expiry_date` | Ignored | Staff handles expiry manually during packing |
+| Quantity | From separate sync | Hourly sync will provide stock quantity |
+
+**Note:** Batch tracking not needed - see "Batch/Expiry Tracking" section below.
 
 ---
 
@@ -137,21 +138,21 @@ Product:
 ├── name (string)             # shorttext
 ├── name_display (string)     # ext_print_productname (optional)
 ├── ingredients (text)        # ext_zutaten
-├── weight (int)              # In grams (parsed from ext_weight)
-├── unit (string)             # pcs., kg, etc.
 ├── vendor (string)           # vendorname
 ├── packing_type (string)     # Box, Single, etc.
 │
-├── # Pricing (from 1C)
-├── price_synced (decimal)    # ext_sales_price from 1C
-├── price_override (decimal)  # Owner override (nullable) - takes precedence
-│   # Effective price = price_override ?? price_synced
+├── # Units & Pricing
+├── selling_unit (enum)           # How customer orders: "pcs" | "kg" | "g"
+├── pricing_unit (enum)           # How price is calculated: "pcs" | "kg"
+├── price_per_pricing_unit_synced (decimal)   # From 1C
+├── price_per_pricing_unit_override (decimal) # Owner override (nullable)
+├── weight_per_unit_grams (int, nullable)     # For piece-based: grams per piece
+├── average_weight_grams (int, nullable)      # For discrete weight-priced (fish): avg weight
 │
 ├── # Stock (from 1C)
-├── stock_synced (int)        # Raw quantity from 1C
-├── stock_override (int)      # Owner override (nullable) - takes precedence
-├── stock_buffer (int)        # Default 5, per-product override
-│   # Effective stock = (stock_override ?? stock_synced) - stock_buffer
+├── stock_amount_synced (decimal)   # Raw amount from 1C (pieces or kg)
+├── stock_amount_override (decimal) # Owner override (nullable)
+├── stock_buffer (decimal)          # Default 5, per-product override
 │
 ├── # Nutritional (per 100g)
 ├── kcal (int)
@@ -176,11 +177,45 @@ Product:
 └── last_synced_at (datetime) # When scraper last updated this
 ```
 
-**Price/Stock Override Logic:**
-- 1C syncs `price_synced` and `stock_synced` hourly
-- Owner can set `price_override` or `stock_override` in admin dashboard
-- Override takes precedence over synced value
-- To revert to 1C value, set override to NULL
+### Product Types & Pricing Logic
+
+Three product types based on `selling_unit` and `pricing_unit`:
+
+| Type | Example | selling_unit | pricing_unit | avg_weight | Display Price |
+|------|---------|--------------|--------------|------------|---------------|
+| Piece-based | Salami | pcs | pcs | NULL | €3.99/piece |
+| Weight-based (continuous) | Cheese | kg | kg | NULL | €12.99/kg |
+| Weight-priced discrete | Fish | pcs | kg | 350g | €5.25/piece* |
+
+*Fish: €15.00/kg × 0.35kg = €5.25/piece (based on average weight)
+
+**Effective price calculation:**
+```python
+def get_display_price(product):
+    base_price = product.price_override ?? product.price_synced
+
+    if product.selling_unit == product.pricing_unit:
+        return base_price  # Simple case
+
+    if product.selling_unit == "pcs" and product.pricing_unit == "kg":
+        # Fish case: price per piece = price per kg × average weight
+        return base_price * (product.average_weight_grams / 1000)
+```
+
+**Frontend display:**
+- Piece-based: "€3.99" with "Add to cart" button
+- Weight-based: "€12.99/kg" with weight selector (100g, 250g, 500g...)
+- Fish: "~€5.25/piece (avg 350g)" with quantity selector
+
+**Stock calculation:**
+```python
+effective_stock = (stock_amount_override ?? stock_amount_synced) - stock_buffer
+```
+
+**Override logic:**
+- 1C syncs `price_per_pricing_unit_synced` and `stock_amount_synced` hourly
+- Owner can set overrides in admin dashboard
+- Override takes precedence; set to NULL to revert to 1C value
 
 ### ProductImage Model
 
@@ -205,22 +240,81 @@ Category:
 └── slug (string)             # URL-friendly name
 ```
 
-### Future: Batch/Inventory Model (Phase 2)
+### Batch/Expiry Tracking - NOT NEEDED
 
-```python
-ProductBatch:
-├── id (UUID)
-├── product_id (FK)
-├── quantity (int)
-├── expiry_date (date)
-├── received_at (datetime)
-└── is_active (bool)
+**Decision:** Batch tracking is deferred indefinitely. Not needed for Phase 1 (or likely Phase 2).
+
+**Reasoning (discussed with shop owner):**
+- 1C only provides batch expiry dates, NOT quantity-per-batch (e.g., "3 batches expiring X, Y, Z" but not "10 units expire X, 20 units expire Y")
+- Shop staff packs all orders - they manually select appropriate expiry dates
+- Products move fast - close-to-expiry items are rare
+- Items close to expiry are churned from 1C before becoming a problem
+- Scale is small enough for manual coordination
+- If expiry date is problematic for an order, staff contacts customer directly
+
+**What we track instead:** Just total `stock_quantity`. The stock buffer (quantity - 5) ensures physical shop always has items to handle edge cases.
+
+**Future consideration:** If scale increases significantly, revisit batch tracking. Would require 1C to provide quantity-per-batch data.
+
+---
+
+## Product Search & Filtering
+
+How customers find products on the frontend.
+
+### Search
+
+**Full-text search** on:
+- `name` (primary)
+- `name_display`
+- `ingredients`
+- `vendor`
+
+**Implementation options:**
+- **Phase 1:** PostgreSQL `ILIKE` or `tsvector` (built-in, good enough for ~1000 products)
+- **Phase 2:** Elasticsearch/Meilisearch if search performance becomes an issue
+
+### Filters
+
+| Filter | Type | Example |
+|--------|------|---------|
+| Category | Single/Multi select | "Sausage", "Dairy" |
+| Price range | Min/Max slider | €0 - €50 |
+| In stock | Toggle | Only show available |
+| Vendor | Multi select | "Lackmann", etc. |
+
+**Optional filters (Phase 2):**
+| Filter | Type | Notes |
+|--------|------|-------|
+| Nutritional | Range | "< 500 kcal", "Low sugar" |
+| Dietary | Tags | "Vegetarian", "Gluten-free" (would need new field) |
+| Weight range | Min/Max | For weight-based products |
+
+### Sorting
+
+| Sort option | Field |
+|-------------|-------|
+| Name A-Z | `name` ASC |
+| Name Z-A | `name` DESC |
+| Price low-high | effective_price ASC |
+| Price high-low | effective_price DESC |
+| Newest | `created_at` DESC |
+
+### API Endpoint
+
+```
+GET /api/products
+    ?search=salami
+    &category=sausage
+    &min_price=0
+    &max_price=20
+    &in_stock=true
+    &sort=price_asc
+    &page=1
+    &per_page=20
 ```
 
-**Note:** Batch tracking needs discussion with shop owner. Key questions:
-- How are batches tracked in 1C?
-- Do we need FIFO (first expiry, first out) for online orders?
-- Should expiring-soon products be discounted automatically?
+Returns paginated product list with total count for frontend pagination.
 
 ---
 
@@ -357,12 +451,24 @@ OrderItem:
 │
 ├── # Product Snapshot (captured at order time)
 ├── product_name (string)        # In case product name changes
-├── product_price (decimal)      # Price at time of order
 ├── product_barcode (string)     # For packing/verification
+├── selling_unit (string)        # "pcs", "kg", "g" at order time
+├── unit_price (decimal)         # Price per selling unit at order time
 │
-├── quantity (int)
-└── line_total (decimal)         # product_price * quantity
+├── # Quantity (interpretation depends on selling_unit)
+├── quantity (decimal)           # 3 (pieces) or 0.5 (kg)
+└── line_total (decimal)         # unit_price × quantity
 ```
+
+**OrderItem examples:**
+
+| Product | selling_unit | quantity | unit_price | line_total |
+|---------|--------------|----------|------------|------------|
+| 3× Salami | pcs | 3 | €3.99 | €11.97 |
+| 500g Cheese | kg | 0.5 | €12.99 | €6.50 |
+| 2× Fish | pcs | 2 | €5.25* | €10.50 |
+
+*Fish unit_price is pre-calculated from avg_weight × price_per_kg
 
 ### Order Status Flow
 
@@ -471,6 +577,51 @@ POST /api/products/sync/batch     # Batch upsert (multiple products)
 POST /api/stock/sync              # Stock-only update (hourly sync)
 ```
 
+### Sync Edge Cases
+
+#### 1. Product Deleted from 1C
+**Decision:** Soft delete - set `is_available = false`, keep record.
+
+- Product stays in database (order history intact)
+- Becomes unavailable for purchase
+- Admin can see "missing from 1C" flag
+- Can be re-enabled if product reappears in 1C
+
+#### 2. Sync Fails Mid-Batch
+**Decision:** Partial success with logging.
+
+- Save products that succeeded
+- Log failures with error details
+- Alert admin if failure rate > threshold (e.g., >10%)
+- Failed products retain previous values
+- Retry failed ones on next sync
+
+#### 3. Parsing Errors (Weight, Price)
+**Decision:** Parse defensively, never overwrite good data with bad.
+
+```python
+def parse_weight(raw: str) -> int | None:
+    """Parse '0.250 kg' → 250 (grams)"""
+    try:
+        # Handle "0.250 kg", "250 g", "0,250 kg" etc.
+        cleaned = raw.lower().replace(",", ".").strip()
+        if "kg" in cleaned:
+            return int(float(cleaned.replace("kg", "").strip()) * 1000)
+        if "g" in cleaned:
+            return int(float(cleaned.replace("g", "").strip()))
+        return None
+    except:
+        return None
+
+# Usage: only update if parse succeeds
+new_weight = parse_weight(raw_value)
+if new_weight is not None:
+    product.weight_per_unit_grams = new_weight
+# else: keep existing value, log warning
+```
+
+**Price:** Comes directly from 1C as number now (not string), no parsing needed.
+
 ---
 
 ## Admin Dashboard
@@ -542,10 +693,11 @@ The owner and staff need a dashboard to manage orders, products, and customers.
 
 ## Open Questions (To verify with shop owner)
 
-1. **Price field:** Use `ext_sales_price` or `baseprice`?
-2. **Batch tracking:** How does 1C track product batches/expiry dates?
-3. **Quantity field:** Where does stock quantity come from in 1C?
-4. **Sync frequency:** Is hourly sync sufficient for stock updates?
+1. **Price field:** Use `ext_sales_price` or `baseprice`? *(Needs verification)*
+2. ~~**Batch tracking:** How does 1C track product batches/expiry dates?~~ → **RESOLVED:** Not needed, staff handles manually
+3. **Quantity field:** Where does stock quantity come from in 1C? *(Needs verification)*
+4. **Sync frequency:** Is hourly sync sufficient for stock updates? *(Needs verification)*
+5. **Delivery time threshold:** What's the cutoff? 30 min? 45 min? 1 hour? *(Needs verification)*
 
 ---
 
@@ -556,3 +708,5 @@ The owner and staff need a dashboard to manage orders, products, and customers.
 **2026-01-14 (continued):** Added User model with social login support (Google, Facebook via Clerk), fidelity program (spending-based discount 5-20%), delivery range calculation (routing API for coastal/mountain geography), Address model with lat/long for distance calc, GDPR fields, admin notes.
 
 **2026-01-14 (continued):** Added Order and OrderItem models with full status flow (pending→confirmed→processing→shipped→delivered/cancelled). Address snapshot in orders. Stock deduction at confirmation. Payment methods (PayPal, card, COD) with manual refunds for Phase 1. Updated Product model with price_override and stock_override for owner control over 1C synced values. Added ProductImage model. Added comprehensive Admin Dashboard spec covering order management, product management, customer management, inventory alerts, settings, and Phase 2 reports.
+
+**2026-01-14 (continued):** Resolved batch/expiry tracking - NOT NEEDED (staff handles manually, 1C doesn't provide quantity-per-batch). Added three product types: piece-based (salami), weight-based continuous (cheese), and weight-priced discrete (fish with average weight). Separated selling_unit from pricing_unit. Added sync edge cases (soft delete for removed products, partial success for failed syncs, defensive parsing). Added Product Search & Filtering section with full-text search, category/price/stock filters, sorting options, and API endpoint spec.

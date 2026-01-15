@@ -39,7 +39,7 @@ To handle the problem of concurrent purchases (online vs in-store), we use a **s
 available_online = stock_quantity - stock_buffer
 ```
 
-- Default buffer: **10 items** (configurable)
+- Default buffer: **5 items** (configurable)
 - This ensures the physical shop always has items to display
 - Avoids the complexity of real-time inventory sync
 
@@ -56,10 +56,14 @@ Product:
 ├── name (string)
 ├── description (text)
 ├── price (decimal)
-├── weight (decimal)       # In grams? kg?
+├── weight (decimal)       # In grams
 ├── stock_quantity (int)   # Raw quantity from 1C
 ├── stock_buffer (int)     # Default 10, configurable per product?
-├── nutritional_values (JSON or separate table)
+├── nutritional_values (int) #kcal
+├── total_carbs (int) #grams
+├── total_fat (int) #grams
+├── total_proteins (int) #grams
+├── total_sugar (int) #grams
 ├── category_id (FK)
 ├── images (relation)
 ├── is_available (bool)    # Can be manually disabled
@@ -70,20 +74,8 @@ Product:
 ### Key Decisions to Make
 
 #### 1. Stock Buffer
-- **Global setting** (all products use same buffer, e.g., 10)?
-- **Per-product** (some items might need higher buffer)?
-- Suggestion: global default + per-product override if needed
+- global default + per-product override if needed
 
-#### 2. Nutritional Values
-- **JSON field** - flexible, easy to store whatever 1C provides
-- **Separate table** - more structured, better for filtering/searching
-
-Question: What format does 1C give you for nutritional values?
-
-#### 3. Categories
-Question: Does 1C have a category hierarchy (e.g., "Dairy > Cheese > Hard Cheese") or flat categories?
-
----
 
 ## Authentication with Clerk
 
@@ -94,7 +86,7 @@ The authentication flow:
 3. **Backend** validates that JWT on protected routes
 4. **Backend** extracts user ID from token, creates/updates local user record
 
-Question: Do you want users to be able to checkout as guests, or require login?
+Users are required to login
 
 ---
 
@@ -120,11 +112,7 @@ Decision: **Option B** - Scraper will call backend API endpoints.
 
 ## Open Questions
 
-1. Weight unit: grams or kg?
-2. Nutritional values format from 1C?
-3. Category hierarchy: flat or nested?
-4. Guest checkout: allowed or require login?
-5. Stock buffer: global only or per-product override?
+1. Category hierarchy (flat possibly)
 
 ---
 

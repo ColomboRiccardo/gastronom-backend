@@ -53,5 +53,5 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     name_display:  Mapped[str] = mapped_column(String(255), nullable=False)
     ingredients: Mapped[str] = mapped_column(Text)
-
+    packing_type: Mapped[str] = mapped_column(String(255))
     

@@ -155,6 +155,56 @@ class Category(Base):
 
 ---
 
+### 4. Foreign Key vs Relationship - What's the difference?
+
+**Foreign Key (`parent_id` column):**
+```python
+parent_id: Mapped[uuid.UUID | None] = mapped_column(
+    UUID(as_uuid=True), ForeignKey("categories.id"), nullable=True
+)
+```
+This creates an **actual column in the database**. It stores the UUID of the parent category. This is **required** for the hierarchy.
+
+**Relationship (`parent`, `children`):**
+```python
+parent: Mapped["Category | None"] = relationship(...)
+children: Mapped[list["Category"]] = relationship(...)
+```
+These do **NOT create database columns**. They're SQLAlchemy ORM shortcuts for accessing related objects in Python.
+
+---
+
+**Without relationships:**
+```python
+# To get a category's parent, you'd do:
+category = db.query(Category).get(some_id)
+parent = db.query(Category).get(category.parent_id)  # Extra query, manual
+```
+
+**With relationships:**
+```python
+# SQLAlchemy handles it for you:
+category = db.query(Category).get(some_id)
+parent = category.parent  # Automatic, cleaner
+children = category.children  # Get all subcategories
+```
+
+---
+
+**When do you need relationships?**
+
+| Use Case | Need `parent`? | Need `children`? |
+|----------|----------------|------------------|
+| Show breadcrumb: "Sausage > Raw sausage" | Yes | No |
+| Show subcategories on category page | No | Yes |
+| Admin: display category tree | Yes | Yes |
+| API: just return `parent_id` in JSON | No | No |
+
+**Key insight:** Relationships are optional ORM convenience. You can always add them later without changing the database schema. The FK column is what actually matters for data integrity.
+
+---
+
 ## Session Log
 
 **2026-01-16:** Added initial SQLAlchemy concepts (FK order, Mapped syntax, UUID vs Integer).
+**2026-01-16:** Added explanation of Foreign Key vs Relationship (columns vs ORM convenience).

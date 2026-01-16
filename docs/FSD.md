@@ -138,7 +138,6 @@ Product:
 ├── name (string)             # shorttext
 ├── name_display (string)     # ext_print_productname (optional)
 ├── ingredients (text)        # ext_zutaten
-├── vendor (string)           # vendorname
 ├── packing_type (string)     # Box, Single, etc.
 │
 ├── # Units & Pricing

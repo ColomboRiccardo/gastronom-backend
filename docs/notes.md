@@ -155,6 +155,125 @@ class Category(Base):
 
 ---
 
+### 5. What goes in `Mapped[...]`? (Python types vs SQLAlchemy types)
+
+**The rule:** `Mapped` takes **Python types**, not SQLAlchemy types.
+
+There are two "worlds":
+1. **Python world** - `str`, `int`, `uuid.UUID`, `Decimal`, `datetime`
+2. **SQLAlchemy world** - `String`, `Integer`, `UUID`, `Numeric`, `DateTime`
+
+```python
+column: Mapped[PythonType] = mapped_column(SQLAlchemyType, ...)
+```
+
+**Common mistake:**
+```python
+# WRONG - UUID here is SQLAlchemy type:
+id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ...)
+
+# RIGHT - uuid.UUID is Python type:
+id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ...)
+```
+
+**Quick reference:**
+
+| Python Type | SQLAlchemy Type | Example |
+|-------------|-----------------|---------|
+| `str` | `String(n)` or `Text` | `Mapped[str] = mapped_column(String(255))` |
+| `int` | `Integer` | `Mapped[int] = mapped_column(Integer)` |
+| `bool` | `Boolean` | `Mapped[bool] = mapped_column(Boolean)` |
+| `uuid.UUID` | `UUID(as_uuid=True)` | `Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))` |
+| `Decimal` | `Numeric(p, s)` | `Mapped[Decimal] = mapped_column(Numeric(10, 2))` |
+| `datetime` | `DateTime` | `Mapped[datetime] = mapped_column(DateTime)` |
+
+**Nullable version:** Add `| None` to Python type:
+```python
+Mapped[str | None]      # Can be string or NULL
+Mapped[Decimal | None]  # Can be Decimal or NULL
+```
+
+**Standard imports for models:**
+```python
+import uuid
+from decimal import Decimal
+from datetime import datetime
+from sqlalchemy import String, Integer, Text, Boolean, DateTime, ForeignKey, Numeric
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import UUID
+```
+
+---
+
+### 6. Why Decimal instead of Float? (Money precision)
+
+**Float has precision problems:**
+```python
+>>> 0.1 + 0.2
+0.30000000000000004  # NOT 0.3!
+
+>>> 19.99 * 3
+59.970000000000006   # NOT 59.97!
+```
+
+This happens because floats are stored in binary, and some decimal numbers (like 0.1) can't be represented exactly in binary - just like 1/3 can't be written exactly in decimal (0.333...).
+
+**For money, this is unacceptable:**
+```python
+# Float disaster:
+price = 19.99
+quantity = 1000
+total = price * quantity  # 19989.999999999996 instead of 19990.00
+
+# After many transactions, you're missing cents/euros
+```
+
+**Decimal is exact:**
+```python
+from decimal import Decimal
+
+>>> Decimal("0.1") + Decimal("0.2")
+Decimal('0.3')  # Exact!
+
+>>> Decimal("19.99") * 3
+Decimal('59.97')  # Exact!
+```
+
+**Rule:** Always use `Decimal` for money, prices, quantities you sell by weight.
+
+---
+
+### 7. What is Numeric(precision, scale)?
+
+`Numeric(precision, scale)` is the SQLAlchemy type for exact decimal numbers in the database.
+
+- **precision** = total number of digits
+- **scale** = digits after decimal point
+
+```python
+Numeric(10, 2)  # Up to 99999999.99 (10 digits total, 2 after decimal)
+Numeric(6, 3)   # Up to 999.999 (6 digits total, 3 after decimal)
+```
+
+**Examples for Gastronom:**
+
+| Use Case | Type | Max Value |
+|----------|------|-----------|
+| Price in € | `Numeric(10, 2)` | €99,999,999.99 |
+| Weight in kg | `Numeric(10, 3)` | 9,999,999.999 kg |
+| Stock quantity | `Numeric(10, 3)` | 9,999,999.999 units |
+| Percentage | `Numeric(5, 2)` | 999.99% |
+
+**In PostgreSQL**, `Numeric` becomes the `NUMERIC` or `DECIMAL` type (they're identical in Postgres).
+
+**Don't confuse:**
+- `Numeric` = SQLAlchemy type (for database)
+- `Decimal` = Python type (for code)
+- `DECIMAL` = Also SQLAlchemy type, but just use `Numeric`
+
+---
+
 ## Session Log
 
 **2026-01-16:** Added initial SQLAlchemy concepts (FK order, Mapped syntax, UUID vs Integer).
+**2026-01-18:** Added Mapped type reference (Python vs SQLAlchemy types), Decimal vs Float explanation, Numeric precision/scale guide.

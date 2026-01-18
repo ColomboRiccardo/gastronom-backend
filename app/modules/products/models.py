@@ -38,7 +38,7 @@
 #  last_synced_at (datetime)                    # When scraper last updated this
 
 import uuid
-from sqlalchemy import String, ForeignKey, Integer, Text, Enum, Float, Boolean, DateTime
+from sqlalchemy import String, ForeignKey, Integer, Text, Enum, Float, Boolean, DateTime, DECIMAL
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.core.database import Base
@@ -54,4 +54,10 @@ class Product(Base):
     name_display:  Mapped[str] = mapped_column(String(255), nullable=False)
     ingredients: Mapped[str] = mapped_column(Text)
     packing_type: Mapped[str] = mapped_column(String(255))
-    
+
+    selling_unit: Mapped[str] = mapped_column(Enum("pcs", "kg", "g"))
+    pricing_unit: Mapped[str] = mapped_column(Enum("pcs", "kg"))
+    price_per_pricing_unit_synced: Mapped[DECIMAL] = mapped_column(Numeric(10, 2))
+    price_per_pricing_unit_override: Mapped[DECIMAL | None] = mapped_column(Numeric(10, 2), nullable=True)
+    weight_per_unit_grams: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    average_weight_grams: Mapped[int | None] = mapped_column(Integer, nullable=True)
